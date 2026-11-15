@@ -1,0 +1,53 @@
+name: recon-aapt2
+
+on:
+  workflow_dispatch:
+
+jobs:
+  recon:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Clone Android 17 repos
+        run: |
+          set -ex
+          mkdir -p src && cd src
+          T=android-17.0.0_r1
+          B=https://android.googlesource.com/platform
+          git clone --depth=1 --branch $T $B/frameworks/base frameworks_base
+          git clone --depth=1 --branch $T $B/system/core system_core
+          git clone --depth=1 --branch $T $B/system/libbase system_libbase
+          git clone --depth=1 --branch $T $B/system/libziparchive system_libziparchive
+          git clone --depth=1 --branch $T $B/system/logging system_logging
+          git clone --depth=1 --branch $T $B/build/soong build_soong
+          du -sh *
+
+      - name: Collect build files and listings
+        run: |
+          set -x
+          cd src
+          mkdir -p ../recon
+          for f in \
+            frameworks_base/tools/aapt2/Android.bp \
+            frameworks_base/libs/androidfw/Android.bp \
+            frameworks_base/cmds/idmap2/Android.bp \
+            frameworks_base/cmds/idmap2/libidmap2_policies/Android.bp \
+            system_core/libutils/Android.bp \
+            system_core/libcutils/Android.bp \
+            system_logging/liblog/Android.bp \
+            system_libbase/Android.bp \
+            system_libziparchive/Android.bp \
+            build_soong/cc/libbuildversion/Android.bp
+          do
+            if [ -f $f ]; then cp --parents $f ../recon/; else echo "MISSING $f" | tee -a ../recon/missing.txt; fi
+          done
+          find frameworks_base/tools/aapt2 -type f \( -name '*.cpp' -o -name '*.h' -o -name '*.proto' \) | sort > ../recon/aapt2-files.txt
+          find frameworks_base/libs/androidfw -type f \( -name '*.cpp' -o -name '*.h' \) | sort > ../recon/androidfw-files.txt
+          find system_core/libutils system_core/libcutils system_logging/liblog system_libbase system_libziparchive build_soong/cc/libbuildversion frameworks_base/cmds/idmap2/libidmap2_policies -type f \( -name '*.cpp' -o -name '*.c' -o -name '*.h' -o -name 'Android.bp' \) | sort > ../recon/lib-files.txt
+          wc -l ../recon/*.txt
+          ls -R ../recon | head -80
+
+      - name: Upload recon
+        uses: actions/upload-artifact@v4
+        with:
+          name: aapt2-recon
+          path: recon
