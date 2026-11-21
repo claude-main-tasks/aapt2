@@ -1,0 +1,107 @@
+name: build-mold-aarch64
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "mold git tag to build (last C++ release is v2.42.1)"
+        required: true
+        default: "v2.42.1"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    container: debian:trixie
+    defaults:
+      run:
+        shell: bash
+    env:
+      MOLD_TAG: ${{ inputs.version }}
+    steps:
+      - name: Install deps
+        run: |
+          apt-get update
+          apt-get install -y git ca-certificates clang g++ cmake ninja-build pkg-config file binutils \
+            libssl-dev zlib1g-dev libzstd-dev
+          cmake --version | head -1
+          clang++ --version | head -1
+
+      - name: Assert aarch64 host
+        run: |
+          set -e
+          test $(uname -m) = aarch64
+          clang++ -dumpmachine | grep -q aarch64
+
+      - name: Clone mold
+        run: |
+          set -ex
+          git clone --depth=1 --branch "$MOLD_TAG" https://github.com/rui314/mold.git mold
+          git -C mold log -1 --format='%H %s'
+
+      - name: Configure
+        working-directory: mold
+        run: |
+          set -ex
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DMOLD_MOSTLY_STATIC=ON
+
+      - name: Build
+        working-directory: mold
+        run: |
+          set -o pipefail
+          cmake --build build -j4 2>&1 | tee ../build.log
+          ls -l build/mold
+
+      - name: Verify output is aarch64
+        working-directory: mold
+        run: |
+          set -ex
+          file build/mold
+          readelf -h build/mold | tee elf-header.txt
+          grep -q 'Machine:.*AArch64' elf-header.txt
+          ldd build/mold || true
+          build/mold --version
+
+      - name: Check the options Chromium's Android link line uses
+        working-directory: mold
+        run: |
+          set +e
+          while read -r opt; do
+            out=$(build/mold $opt 2>&1)
+            if echo "$out" | grep -qi "unknown command line option"; then
+              echo "UNSUPPORTED: $opt"
+            else
+              echo "ok:          $opt"
+            fi
+          done <<'EOF'
+          --pack-dyn-relocs=android+relr
+          --pack-dyn-relocs=relr
+          --no-rosegment
+          --icf=all
+          --undefined-version
+          --build-id
+          --warn-shared-textrel
+          --separate-debug-file=x.debug
+          -z max-page-size=16384
+          -z nocopyreloc
+          -wrap=malloc
+          EOF
+          set -e
+          if build/mold --pack-dyn-relocs=android+relr 2>&1 | grep -qi 'unknown command line option'; then
+            echo "android+relr is NOT supported by this mold"
+            exit 1
+          fi
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mold-build-log
+          path: build.log
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: mold-aarch64
+          path: mold/build/mold
